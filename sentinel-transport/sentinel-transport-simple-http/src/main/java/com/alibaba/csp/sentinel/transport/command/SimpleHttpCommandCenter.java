@@ -22,14 +22,7 @@ import java.net.SocketException;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import com.alibaba.csp.sentinel.command.CommandHandler;
 import com.alibaba.csp.sentinel.command.CommandHandlerProvider;
@@ -57,7 +50,7 @@ public class SimpleHttpCommandCenter implements CommandCenter {
 
     @SuppressWarnings("PMD.ThreadPoolCreationRule")
     private ExecutorService executor = Executors.newSingleThreadExecutor(
-        new NamedThreadFactory("sentinel-command-center-executor"));
+            new NamedThreadFactory("sentinel-command-center-executor"));
     private ExecutorService bizExecutor;
 
     private ServerSocket socketReference;
@@ -74,15 +67,15 @@ public class SimpleHttpCommandCenter implements CommandCenter {
     public void start() throws Exception {
         int nThreads = Runtime.getRuntime().availableProcessors();
         this.bizExecutor = new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<Runnable>(10),
-            new NamedThreadFactory("sentinel-command-center-service-executor"),
-            new RejectedExecutionHandler() {
-                @Override
-                public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-                    CommandCenterLog.info("EventTask rejected");
-                    throw new RejectedExecutionException();
-                }
-            });
+                new ArrayBlockingQueue<Runnable>(10),
+                new NamedThreadFactory("sentinel-command-center-service-executor"),
+                new RejectedExecutionHandler() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+                        CommandCenterLog.info("EventTask rejected");
+                        throw new RejectedExecutionException();
+                    }
+                });
 
         Runnable serverInitTask = new Runnable() {
             int port;
@@ -182,13 +175,23 @@ public class SimpleHttpCommandCenter implements CommandCenter {
 
         @Override
         public void run() {
+            //loop accept ,receive request and
             while (true) {
                 Socket socket = null;
                 try {
                     socket = this.serverSocket.accept();
                     setSocketSoTimeout(socket);
+                    //Give it to the biz threadPool for processing
                     HttpEventTask eventTask = new HttpEventTask(socket);
-                    bizExecutor.submit(eventTask);
+                    //add server initiative timeout，prevent bizThreadPool full normal requests may be affected
+                    Future<String> future = bizExecutor.submit(eventTask,"ok");
+                    try {
+                        future.get(DEFAULT_SERVER_SO_TIMEOUT, TimeUnit.MILLISECONDS);
+                    }catch (TimeoutException | InterruptedException | ExecutionException ex){
+                        CommandCenterLog.error("httpEventTask handle request timeout");
+                        //http eventTask timeout,call cancel (interrupt this thread)
+                        future.cancel(true);
+                    }
                 } catch (Exception e) {
                     CommandCenterLog.info("Server error", e);
                     if (socket != null) {
